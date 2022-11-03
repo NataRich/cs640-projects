@@ -11,14 +11,17 @@ import net.floodlightcontroller.packet.ICMP;
 import net.floodlightcontroller.packet.IPv4;
 import net.floodlightcontroller.packet.MACAddress;
 
+import java.math.BigInteger;
+import java.net.InetAddress;
+import java.net.UnknownHostException;
 import java.nio.ByteBuffer;
+import java.nio.ByteOrder;
 import java.util.Arrays;
 import java.util.Queue;
 import java.util.Timer;
 import java.util.TimerTask;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentLinkedQueue;
-import java.util.concurrent.atomic.AtomicInteger;
 
 /**
  * @author Aaron Gember-Jacobson and Anubhavnidhi Abhashkumar
@@ -136,20 +139,22 @@ public class Router extends Device
 			int targetIp = ByteBuffer.wrap(packet.getTargetProtocolAddress()).getInt();
 			if (targetIp == inIface.getIpAddress()) {
 				sendPacket(generateArpReply(etherPacket, inIface), inIface);
-				System.out.println("Done sending ARP reply");
 			}
 		} else if (packet.getOpCode() == ARP.OP_REPLY) {
 			System.out.println("Handling an ARP reply packet / updating arpCache");
 			int sourceIp = ByteBuffer.wrap(packet.getSenderProtocolAddress()).getInt();
 			arpCache.insert(new MACAddress(packet.getSenderHardwareAddress()), sourceIp);
 			if (queueMap.containsKey(sourceIp)) {
-				System.out.printf("First time found IP (%s)", sourceIp);
+				System.out.println("Dequeue packets of " + getStringIp(sourceIp));
 				Queue<EthernetStore> queue = queueMap.remove(sourceIp);
+				int sent = 0;
 				while (queue != null && !queue.isEmpty()) {
+					sent++;
 					EthernetStore s = queue.poll();
 					s.ether.setDestinationMACAddress(packet.getSenderHardwareAddress());
 					sendPacket(s.ether, inIface);
 				}
+				System.out.println("Sent " + sent + " queued packets");
 			}
 		}
 	}
@@ -266,9 +271,7 @@ public class Router extends Device
 //				sendPacket(hostUnreachable, inIface);
 //			}
 			enqueuePacket(etherPacket, outIface, nextHop);
-			System.out.println("Start broadcasting ARP requests");
-			TimerTask task = new ArpRequestTask(nextHop, outIface);
-			timer.schedule(task, 0, 1000);
+			timer.schedule(new ArpRequestTask(nextHop, outIface), 0, 1000);
 			return;
 		}
         etherPacket.setDestinationMACAddress(arpEntry.getMac().toBytes());
@@ -453,7 +456,7 @@ public class Router extends Device
 	 * @param nextHop The ip address of the packet.
 	 */
 	private void enqueuePacket(Ethernet ether, Iface inIface, int nextHop) {
-		System.out.println("Putting " + nextHop + "'s packets in queue");
+		System.out.println("Enqueuing " + getStringIp(nextHop) + "'s packets");
 		Queue<EthernetStore> queue = queueMap.get(nextHop);
 		if (queue == null) {
 			queue = new ConcurrentLinkedQueue<>();
@@ -483,7 +486,10 @@ public class Router extends Device
 	}
 
 	public class EthernetStore {
+		/** IP packet whose destination MAC address cannot be found in arpCache */
 		public Ethernet ether;
+
+		/** The interface obtained by route table lookup */
 		public Iface inIface;
 
 		public EthernetStore(Ethernet ether, Iface inIface) {
@@ -497,8 +503,6 @@ public class Router extends Device
 		public final int nextHop;
 		public final Iface outIface;
 
-		public int runtime = 0;
-
 		public ArpRequestTask(int nextHop, Iface outIface) {
 			this.count = 0;
 			this.nextHop = nextHop;
@@ -507,32 +511,58 @@ public class Router extends Device
 
 		@Override
 		public void run() {
-			System.out.println("runtime = " + ++runtime);
-
 			if (queueMap.containsKey(nextHop)) {
 				if (count >= 3) {
-					System.out.printf("No response after 3 times. Dropping packets associated with %d\n", nextHop);
+					System.out.println("No response after 3 times. Dropping packets of " + getStringIp(nextHop));
 					// drop all packets associated with the ip
 					Queue<EthernetStore> queue = queueMap.remove(nextHop);
 					int n = 0;
 					while (queue != null && !queue.isEmpty()) {
-						System.out.println("Queue not empty");
 						EthernetStore s = queue.poll();
 						Ethernet hostUnreachable = generateICMP(s.ether, s.inIface, ICMPType.HOST_UNREACHABLE);
 						if (hostUnreachable != null) {
-							System.out.println("Sending host unreachable ICMP message back: " + ++n);
+							System.out.println("Sending host unreachable message back before dropping: " + ++n);
 							sendPacket(hostUnreachable, s.inIface);
 						}
 					}
 					cancel();
 				} else {
 					count++;
-					System.out.printf("Broadcasting (%d) ARP request associated with %d\n", count, nextHop);
+					System.out.printf("Sending (%d) ARP request [%s] to the interface on which it arrived\n", count, getStringIp(nextHop));
 					sendPacket(generateArpRequest(outIface, nextHop), outIface);
 				}
 			} else {
+				if (arpCache.lookup(nextHop) != null) {
+					System.out.println("Should have received an ARP reply because arp cache has the record");
+				} else {
+					System.out.println("Should have received no ARP replies because both arp cache and queue map don't have the record anymore");
+				}
 				cancel();
 			}
 		}
+	}
+
+	/**
+	 * Converts integer ip to string ip format. Copied from www.java2s.com.
+	 *
+	 * @param ip The ip address to be converted.
+	 * @return A string ip.
+	 */
+	private String getStringIp(int ip) {
+		if (ByteOrder.nativeOrder().equals(ByteOrder.BIG_ENDIAN)) {
+			ip = Integer.reverseBytes(ip);
+		}
+
+		byte[] ipByteArray = BigInteger.valueOf(ip).toByteArray();
+
+		String ipAddressString;
+		try {
+			ipAddressString = InetAddress.getByAddress(ipByteArray)
+					.getHostAddress();
+		} catch (UnknownHostException ex) {
+			ipAddressString = "NaN";
+		}
+
+		return ipAddressString;
 	}
 }
