@@ -173,6 +173,7 @@ public class Router extends Device
 			UDP udp = (UDP) ip.getPayload();
 			RIPv2 rip = (RIPv2) udp.getPayload();
 			boolean updated = false;
+			boolean timestampUpdated = false;
 
 			// the neighbors of the router who sends this packet
 			for (RIPv2Entry entry : rip.getEntries()) {
@@ -192,6 +193,7 @@ public class Router extends Device
 						updated = true;
 					} else if (ere.cost == cost) { // update timestamps when ere.cost == cost
 						ere.expireAt = System.currentTimeMillis() + ROUTE_ENTRY_EXP;
+						timestampUpdated = true;
 					}
 				} else {
 					long exp = System.currentTimeMillis() + ROUTE_ENTRY_EXP;
@@ -201,6 +203,10 @@ public class Router extends Device
 					this.routeTable.insert(dest, ip.getSourceAddress(), mask, inIface);
 					updated = true;
 				}
+			}
+
+			if (timestampUpdated) {
+				System.out.println("Routes' timestamps updated");
 			}
 
 			if (updated) {
