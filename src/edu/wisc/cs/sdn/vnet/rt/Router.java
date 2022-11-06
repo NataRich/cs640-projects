@@ -141,12 +141,14 @@ public class Router extends Device
 		case Ethernet.TYPE_IPv4:
 			IPv4 ip = (IPv4) etherPacket.getPayload();
 			if (ip.getProtocol() == IPv4.PROTOCOL_UDP) {
-				UDP udp = (UDP) ip.getPayload();
 				if (ip.getDestinationAddress() == IPv4.toIPv4Address("224.0.0.9")
-						&& udp.getDestinationPort() == UDP.RIP_PORT) {
-					RIPv2 rip = (RIPv2) udp.getPayload();
-					this.handleRipPacket(etherPacket, inIface, rip.getCommand());
-					break;
+						|| ip.getDestinationAddress() == inIface.getIpAddress()) {
+					UDP udp = (UDP) ip.getPayload();
+					if (udp.getDestinationPort() == UDP.RIP_PORT) {
+						RIPv2 rip = (RIPv2) udp.getPayload();
+						this.handleRipPacket(etherPacket, inIface, rip.getCommand());
+						break;
+					}
 				}
 			}
 			this.handleIpPacket(etherPacket, inIface);
@@ -180,7 +182,7 @@ public class Router extends Device
 				int net = dest & mask;
 				if (entryMap.containsKey(net)) {
 					ExtendedRouteEntry ere = entryMap.get(net);
-					if (ere.cost >= cost) {  // update timestamps when ere.cost == cost
+					if (ere.cost > cost) {
 						System.out.println("Before update: " + ere);
 						ere.expireAt = System.currentTimeMillis() + ROUTE_ENTRY_EXP;
 						ere.cost = cost;
@@ -188,6 +190,8 @@ public class Router extends Device
 						System.out.println("After update: " + ere);
 						this.routeTable.update(dest, mask, ip.getSourceAddress(), inIface);
 						updated = true;
+					} else if (ere.cost == cost) { // update timestamps when ere.cost == cost
+						ere.expireAt = System.currentTimeMillis() + ROUTE_ENTRY_EXP;
 					}
 				} else {
 					long exp = System.currentTimeMillis() + ROUTE_ENTRY_EXP;
