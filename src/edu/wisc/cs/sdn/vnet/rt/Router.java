@@ -14,14 +14,9 @@ import net.floodlightcontroller.packet.RIPv2;
 import net.floodlightcontroller.packet.RIPv2Entry;
 import net.floodlightcontroller.packet.UDP;
 
-import java.math.BigInteger;
-import java.net.InetAddress;
-import java.net.UnknownHostException;
 import java.nio.ByteBuffer;
-import java.nio.ByteOrder;
-import java.util.ArrayList;
 import java.util.Arrays;
-import java.util.List;
+import java.util.Map;
 import java.util.Queue;
 import java.util.Timer;
 import java.util.TimerTask;
@@ -110,12 +105,14 @@ public class Router extends Device
 	public void ripInit() {
 		System.out.println("Initializing route table");
 		for (Iface iface : interfaces.values()) {
+			int dest = iface.getIpAddress();
 			int mask = iface.getSubnetMask();
-			int dest = iface.getIpAddress() & mask;
+			int net = dest & mask;
 			ExtendedRouteEntry ere = new ExtendedRouteEntry(dest, mask, 1, dest, -1);
-			entryMap.put(dest, ere);
+			entryMap.put(net, ere);
 			routeTable.insert(dest, 0, mask, iface);
 		}
+		printRoutes();
 		System.out.println("Sending RIP request to all interfaces after initialization");
 		for (Iface iface : interfaces.values()) {
 			sendPacket(generateRIP(null, iface, RIPType.REQUEST), iface);
@@ -173,29 +170,39 @@ public class Router extends Device
 			IPv4 ip = (IPv4) ethernet.getPayload();
 			UDP udp = (UDP) ip.getPayload();
 			RIPv2 rip = (RIPv2) udp.getPayload();
+			boolean updated = false;
 
 			// the neighbors of the router who sends this packet
 			for (RIPv2Entry entry : rip.getEntries()) {
 				int dest = entry.getAddress();
 				int mask = entry.getSubnetMask();
 				int cost = entry.getMetric() + 1;
-				if (entryMap.containsKey(dest)) {
-					ExtendedRouteEntry ere = entryMap.get(dest);
-					if (ere.cost > cost) {
+				int net = dest & mask;
+				if (entryMap.containsKey(net)) {
+					ExtendedRouteEntry ere = entryMap.get(net);
+					if (ere.cost >= cost) {  // update timestamps when ere.cost == cost
 						System.out.println("Before update: " + ere);
 						ere.expireAt = System.currentTimeMillis() + ROUTE_ENTRY_EXP;
 						ere.cost = cost;
 						ere.nextHop = ip.getSourceAddress();
 						System.out.println("After update: " + ere);
 						this.routeTable.update(dest, mask, ip.getSourceAddress(), inIface);
+						updated = true;
 					}
 				} else {
 					long exp = System.currentTimeMillis() + ROUTE_ENTRY_EXP;
 					ExtendedRouteEntry ere = new ExtendedRouteEntry(dest, mask, cost, ip.getSourceAddress(), exp);
 					System.out.println("Insert: " + ere);
-					entryMap.put(dest, ere);
+					entryMap.put(net, ere);
 					this.routeTable.insert(dest, ip.getSourceAddress(), mask, inIface);
+					updated = true;
 				}
+			}
+
+			if (updated) {
+				System.out.println("Routes updated");
+				printRoutes();
+				sendPacket(generateRIP(ethernet, inIface, RIPType.RESPONSE), inIface);
 			}
 		}
 	}
@@ -222,7 +229,7 @@ public class Router extends Device
 			int sourceIp = ByteBuffer.wrap(packet.getSenderProtocolAddress()).getInt();
 			arpCache.insert(new MACAddress(packet.getSenderHardwareAddress()), sourceIp);
 			if (queueMap.containsKey(sourceIp)) {
-				System.out.println("Dequeue packets of " + getStringIp(sourceIp));
+				System.out.println("Dequeue packets of " + IPv4.fromIPv4Address(sourceIp));
 				Queue<EthernetStore> queue = queueMap.remove(sourceIp);
 				int sent = 0;
 				while (queue != null && !queue.isEmpty()) {
@@ -575,7 +582,7 @@ public class Router extends Device
 
 		// Populate my neighbors
 		for (ExtendedRouteEntry entry : this.entryMap.values()) {
-			rip.addEntry(new RIPv2Entry(entry.dest, entry.mask, entry.cost));
+			rip.addEntry(new RIPv2Entry(entry.dest , entry.mask, entry.cost));
 		}
 		udp.setPayload(rip);
 		ip.setPayload(udp);
@@ -591,7 +598,7 @@ public class Router extends Device
 	 * @param nextHop The ip address of the packet.
 	 */
 	private void enqueuePacket(Ethernet ether, Iface inIface, int nextHop) {
-		System.out.println("Enqueuing " + getStringIp(nextHop) + "'s packets");
+		System.out.println("Enqueuing " + IPv4.fromIPv4Address(nextHop) + "'s packets");
 		Queue<EthernetStore> queue = queueMap.get(nextHop);
 		if (queue == null) {
 			queue = new ConcurrentLinkedQueue<>();
@@ -654,14 +661,18 @@ public class Router extends Device
 			this.expireAt = expireAt;
 		}
 
+		private int formatExp(long exp) {
+			return exp < 0 ? -1 : (int) ((exp - System.currentTimeMillis()) / 1000);
+		}
+
 		@Override
 		public String toString() {
 			return "ExtendedRouteEntry{" +
-					"dest=" + dest +
-					", mask=" + mask +
+					"dest=" + IPv4.fromIPv4Address(dest) +
+					", mask=" + IPv4.fromIPv4Address(mask) +
 					", cost=" + cost +
-					", nextHop=" + nextHop +
-					", expireAt=" + expireAt +
+					", nextHop=" + IPv4.fromIPv4Address(nextHop) +
+					", expireAt=" + formatExp(expireAt) +
 					'}';
 		}
 	}
@@ -681,7 +692,7 @@ public class Router extends Device
 		public void run() {
 			if (queueMap.containsKey(nextHop)) {
 				if (count >= 3) {
-					System.out.println("No response after 3 times. Dropping packets of " + getStringIp(nextHop));
+					System.out.println("No response after 3 times. Dropping packets of " + IPv4.fromIPv4Address(nextHop));
 					// drop all packets associated with the ip
 					Queue<EthernetStore> queue = queueMap.remove(nextHop);
 					int n = 0;
@@ -696,7 +707,7 @@ public class Router extends Device
 					cancel();
 				} else {
 					count++;
-					System.out.printf("Sending (%d) ARP request [%s] to the interface on which it arrived\n", count, getStringIp(nextHop));
+					System.out.printf("Sending (%d) ARP request [%s] to the interface on which it arrived\n", count, IPv4.fromIPv4Address(nextHop));
 					sendPacket(generateArpRequest(outIface, nextHop), outIface);
 				}
 			} else {
@@ -723,38 +734,23 @@ public class Router extends Device
 	public class RouteTableTimeOutTask extends TimerTask {
 		@Override
 		public void run() {
-			System.out.println("Checking expired route table entries every 1 second");
 			for (ExtendedRouteEntry ere : entryMap.values()) {
-				if (ere.expireAt >= System.currentTimeMillis()) {
+				if (ere.expireAt != -1 && ere.expireAt <= System.currentTimeMillis()) {
 					System.out.println("Removing " + ere + " due to timeout");
-					entryMap.remove(ere.dest);
+					entryMap.remove(ere.dest & ere.mask);
 					routeTable.remove(ere.dest, ere.mask);
 				}
 			}
 		}
 	}
 
-	/**
-	 * Converts integer ip to string ip format. Copied from www.java2s.com.
-	 *
-	 * @param ip The ip address to be converted.
-	 * @return A string ip.
-	 */
-	private String getStringIp(int ip) {
-		if (ByteOrder.nativeOrder().equals(ByteOrder.BIG_ENDIAN)) {
-			ip = Integer.reverseBytes(ip);
+	private void printRoutes() {
+		String output = "\nEntryMap:\n";
+		for (Map.Entry<Integer, ExtendedRouteEntry> entry : entryMap.entrySet()) {
+			output += "{" + IPv4.fromIPv4Address(entry.getKey()) + ": " + entry.getValue() + "}\n";
 		}
-
-		byte[] ipByteArray = BigInteger.valueOf(ip).toByteArray();
-
-		String ipAddressString;
-		try {
-			ipAddressString = InetAddress.getByAddress(ipByteArray)
-					.getHostAddress();
-		} catch (UnknownHostException ex) {
-			ipAddressString = "NaN";
-		}
-
-		return ipAddressString;
+		output += "\nRouteTable:\n";
+		output += this.routeTable.toString();
+		System.out.println(output);
 	}
 }
