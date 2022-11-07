@@ -142,7 +142,7 @@ public class Router extends Device
 			IPv4 ip = (IPv4) etherPacket.getPayload();
 			if (ip.getProtocol() == IPv4.PROTOCOL_UDP) {
 				if (ip.getDestinationAddress() == IPv4.toIPv4Address("224.0.0.9")
-						|| ip.getDestinationAddress() == inIface.getIpAddress()) {
+						/*|| ip.getDestinationAddress() == inIface.getIpAddress()*/) {  // never handle solicited responses
 					UDP udp = (UDP) ip.getPayload();
 					if (udp.getDestinationPort() == UDP.RIP_PORT) {
 						RIPv2 rip = (RIPv2) udp.getPayload();
@@ -717,7 +717,7 @@ public class Router extends Device
 					cancel();
 				} else {
 					count++;
-					System.out.printf("Sending (%d) ARP request [%s] to the interface on which it arrived\n", count, IPv4.fromIPv4Address(nextHop));
+					System.out.printf("Sending (%d) ARP request [%s] to the %s\n", count, IPv4.fromIPv4Address(nextHop), IPv4.fromIPv4Address(outIface.getIpAddress()));
 					sendPacket(generateArpRequest(outIface, nextHop), outIface);
 				}
 			} else {
