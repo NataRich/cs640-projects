@@ -145,7 +145,7 @@ public class LoadBalancer implements IFloodlightModule, IOFSwitchListener,
 		/*       (2) ARP packets to the controller, and                      */
 		/*       (3) all other packets to the next rule table in the switch  */
 		for (Integer ip: instances.keySet()) {
-			// Install TCP rule (connection-specific)
+			// Install TCP rule (new connection)
 			OFMatch tcpMatch = new OFMatch();
 			tcpMatch.setDataLayerType(OFMatch.ETH_TYPE_IPV4);
 			tcpMatch.setNetworkProtocol(OFMatch.IP_PROTO_TCP);
@@ -153,20 +153,20 @@ public class LoadBalancer implements IFloodlightModule, IOFSwitchListener,
 			OFAction tcpAction = new OFActionOutput(OFPort.OFPP_CONTROLLER);
 			OFInstruction tcpInstruction = new OFInstructionApplyActions(Arrays.asList(tcpAction));
 			SwitchCommands.installRule(sw, table, (short) 2, tcpMatch, Arrays.asList(tcpInstruction));
-
-			// Install ARP rule (connection-specific)
-			OFMatch arpMatch = new OFMatch();
-			arpMatch.setDataLayerType(OFMatch.ETH_TYPE_ARP);
-			arpMatch.setNetworkDestination(ip);
-			OFAction arpAction = new OFActionOutput(OFPort.OFPP_CONTROLLER);
-			OFInstruction arpInstruction = new OFInstructionApplyActions(Arrays.asList(arpAction));
-			SwitchCommands.installRule(sw, table, (short) 2, arpMatch, Arrays.asList(arpInstruction));
 		}
+
+		// Install ARP rule (new connection)
+		OFMatch arpMatch = new OFMatch();
+		arpMatch.setDataLayerType(OFMatch.ETH_TYPE_ARP);
+		OFAction arpAction = new OFActionOutput(OFPort.OFPP_CONTROLLER);
+		OFInstruction arpInstruction = new OFInstructionApplyActions(Arrays.asList(arpAction));
+		SwitchCommands.installRule(sw, table, (short) 2, arpMatch, Arrays.asList(arpInstruction));
 
 		// Install default rule
 		OFMatch defaultMatch = new OFMatch();
 		OFInstruction defaultInstruction = new OFInstructionGotoTable(L3Routing.table);
 		SwitchCommands.installRule(sw, table, (short) 1, defaultMatch, Arrays.asList(defaultInstruction));
+
 		/*********************************************************************/
 	}
 	
@@ -199,10 +199,14 @@ public class LoadBalancer implements IFloodlightModule, IOFSwitchListener,
 		
 		/*********************************************************************/
 		if (ethPkt.getEtherType() == Ethernet.TYPE_ARP) {
+			System.out.println("Loadbalancer: Received an ARP request");
+
 			// Adapted from lab3 implementation
 			ARP requestArp = (ARP) ethPkt.getPayload();
 			Integer loadBalancerIp = IPv4.toIPv4Address(requestArp.getTargetProtocolAddress());
 			if (instances.containsKey(loadBalancerIp)) {
+				System.out.println("Loadbalancer: Sending an ARP reply");
+
 				Ethernet replyEther = new Ethernet();
 				ARP replyArp = new ARP();
 
@@ -227,12 +231,24 @@ public class LoadBalancer implements IFloodlightModule, IOFSwitchListener,
 				SwitchCommands.sendPacket(sw, (short) pktIn.getInPort(), replyEther);
 			}
 		} else if (ethPkt.getEtherType() == Ethernet.TYPE_IPv4) {
+			System.out.println("Loadbalancer: Received an IP packet");
+
 			IPv4 ipPacket = (IPv4) ethPkt.getPayload();
 			if (ipPacket.getProtocol() == IPv4.PROTOCOL_TCP) {
+				System.out.println("Loadbalancer: Received a TCP packet");
+
 				TCP tcpPacket = (TCP) ipPacket.getPayload();
 				Integer loadBalancerIp = ipPacket.getDestinationAddress();
-				if (tcpPacket.getFlags() == TCP_FLAG_SYN && instances.containsKey(loadBalancerIp)) {
+				if (tcpPacket.getFlags() == TCP_FLAG_SYN) {
+					System.out.println("Loadbalancer: Received a TCP SYN on " + IPv4.fromIPv4Address(loadBalancerIp));
+					if (!instances.containsKey(loadBalancerIp)) {
+						System.out.println("Loadbalancer: Couldn't find the loadbalancer " + loadBalancerIp + " (" + IPv4.fromIPv4Address(loadBalancerIp) + ")");
+						return Command.CONTINUE;
+					}
+
 					int hostIp = instances.get(loadBalancerIp).getNextHostIP();
+					System.out.println("Loadbalancer: Found next host ip - " + IPv4.fromIPv4Address(hostIp));
+
 					OFInstruction defaultInstruction = new OFInstructionGotoTable(L3Routing.table);
 
 					// Install rule for packets from clients to servers
@@ -246,7 +262,7 @@ public class LoadBalancer implements IFloodlightModule, IOFSwitchListener,
 					OFAction inIpAction = new OFActionSetField(OFOXMFieldType.IPV4_DST, hostIp);
 					OFAction inMacAction = new OFActionSetField(OFOXMFieldType.ETH_DST, getHostMACAddress(hostIp));
 					OFInstruction inInstruction = new OFInstructionApplyActions(Arrays.asList(inIpAction, inMacAction));
-					SwitchCommands.installRule(sw, table, (short) 3, inMatch, Arrays.asList(inInstruction, defaultInstruction));
+					SwitchCommands.installRule(sw, table, (short) 3, inMatch, Arrays.asList(inInstruction, defaultInstruction), SwitchCommands.NO_TIMEOUT, IDLE_TIMEOUT);
 
 					// Install rules for packets from servers to clients
 					OFMatch outMatch = new OFMatch();
@@ -256,10 +272,10 @@ public class LoadBalancer implements IFloodlightModule, IOFSwitchListener,
 					outMatch.setNetworkDestination(ipPacket.getSourceAddress());
 					outMatch.setTransportSource(OFMatch.IP_PROTO_TCP, tcpPacket.getDestinationPort());
 					outMatch.setTransportDestination(OFMatch.IP_PROTO_TCP, tcpPacket.getSourcePort());
-					OFAction outIpAction = new OFActionSetField(OFOXMFieldType.IPV4_DST, loadBalancerIp);
-					OFAction outMacAction = new OFActionSetField(OFOXMFieldType.ETH_DST, instances.get(loadBalancerIp).getVirtualMAC());
+					OFAction outIpAction = new OFActionSetField(OFOXMFieldType.IPV4_SRC, loadBalancerIp);
+					OFAction outMacAction = new OFActionSetField(OFOXMFieldType.ETH_SRC, instances.get(loadBalancerIp).getVirtualMAC());
 					OFInstruction outInstruction = new OFInstructionApplyActions(Arrays.asList(outIpAction, outMacAction));
-					SwitchCommands.installRule(sw, table, (short) 3, outMatch, Arrays.asList(outInstruction, defaultInstruction));
+					SwitchCommands.installRule(sw, table, (short) 3, outMatch, Arrays.asList(outInstruction, defaultInstruction), SwitchCommands.NO_TIMEOUT, IDLE_TIMEOUT);
 				}
 			}
 		}
