@@ -3,7 +3,6 @@ package edu.wisc.cs.sdn.apps.l3routing;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collection;
-import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
@@ -30,9 +29,7 @@ import net.floodlightcontroller.linkdiscovery.ILinkDiscoveryListener;
 import net.floodlightcontroller.linkdiscovery.ILinkDiscoveryService;
 import net.floodlightcontroller.routing.Link;
 import org.openflow.protocol.OFMatch;
-import org.openflow.protocol.instruction.OFInstruction;
 import org.openflow.protocol.instruction.OFInstructionApplyActions;
-import org.openflow.protocol.action.OFAction;
 import org.openflow.protocol.action.OFActionOutput;
 
 //OFMatch, OFActionOutput, OFAction, OFInstructionApplyActions, OFInstruction
@@ -79,56 +76,48 @@ public class L3Routing implements IFloodlightModule, IOFSwitchListener,
         this.knownHosts = new ConcurrentHashMap<IDevice,Host>();
     }
     //helper function to install rule
-    private boolean instR(IOFSwitch sw, int dstIP, int port) {
-
+    private void instR(IOFSwitch sw, int dstIP, int port) {
         OFMatch matchCriteria = new OFMatch();
         matchCriteria.setNetworkDestination(OFMatch.ETH_TYPE_IPV4, dstIP);
         OFActionOutput out = new OFActionOutput(port);
-        List<OFAction> li = new ArrayList<OFAction>();
-        li.add(out);
-        OFInstructionApplyActions ofAc = new OFInstructionApplyActions(li);
-        List<OFInstruction> instructions = new ArrayList<OFInstruction>();
-        instructions.add(ofAc);
-        return SwitchCommands.installRule(sw, table, SwitchCommands.DEFAULT_PRIORITY, matchCriteria, instructions);
+        OFInstructionApplyActions ofAc = new OFInstructionApplyActions(Arrays.asList(out));
+        SwitchCommands.installRule(sw, table, SwitchCommands.DEFAULT_PRIORITY, matchCriteria, Arrays.asList(ofAc));
     }
     //helper function to install rule in each switch to route to host
     private void installRuleForHost(Host h) {
-        Map<Long, IOFSwitch> switches = this.getSwitches();
-        int dstIP = h.getIPv4Address().intValue();
-        spInfo sp = bellmanFord(h);
-        int[] dist = sp.distance;
-        //int[] prev = sp.previous;
-        Long[] swArr = sp.switchesArray;
-        int[] ports = sp.ports;
-        //rule for each switch: output packet on the right port to reach the next switch in the shortest path
-        //find the index of the host
-        int s;
-        for (s = 0; s < dist.length; s++) {
-            if (dist[s] == 0) {
-                break;
-            }
-        }
-        for (int i = 0; i < swArr.length; i++) {
-            // loop through all switches except for the host's switch
-            // put rule in these switches
-            IOFSwitch sw = switches.get(swArr[i]);
-            if (i != s) {
-                instR(sw, dstIP, ports[i]);
-            } else { //rule for the host's switch: forward packet to the host
-                int port = h.getPort().intValue();
-                instR(sw, dstIP, port);
+        if (h.isAttachedToSwitch()) {
+            int dstIP = h.getIPv4Address();
+            spInfo sp = bellmanFord(h);
+            int[] dist = sp.distance;
+            //int[] prev = sp.previous;
+            Long[] swArr = sp.switchesArray;
+            int[] ports = sp.ports;
+            //rule for each switch: output packet on the right port to reach the next switch in the shortest path
+            //find the index of the host
+            int s;
+            for (s = 0; s < dist.length; s++) {
+                if (dist[s] == 0) {
+                    break;
+                }
             }
 
+            for (int i = 0; i < swArr.length; i++) {
+                // loop through all switches except for the host's switch
+                // put rule in these switches
+                IOFSwitch sw = this.getSwitches().get(swArr[i]);
+                if (i != s) {
+                    instR(sw, dstIP, ports[i]);
+                } else { //rule for the host's switch: forward packet to the host
+                    instR(sw, dstIP, h.getPort());
+                }
+            }
         }
     }
+
     private void removeRuleForHost(Host h) {
-        Collection<IOFSwitch> switches = this.getSwitches().values();
-        Iterator<IOFSwitch> it = switches.iterator();
-        int dstIP = h.getIPv4Address().intValue();
         OFMatch matchCriteria = new OFMatch();
-        matchCriteria.setNetworkDestination(OFMatch.ETH_TYPE_IPV4, dstIP);
-        while (it.hasNext()) {
-            IOFSwitch sw = it.next();
+        matchCriteria.setNetworkDestination(OFMatch.ETH_TYPE_IPV4, h.getIPv4Address());
+        for (IOFSwitch sw : this.getSwitches().values()) {
             SwitchCommands.removeRules(sw, table, matchCriteria);
         }
     }
@@ -146,15 +135,14 @@ public class L3Routing implements IFloodlightModule, IOFSwitchListener,
 
         /*********************************************************************/
         /* TODO: Initialize variables or perform startup tasks, if necessary */
+
         //run shortest path on every host and fill every switch of the info?
-        Collection<Host> hosts = this.getHosts();
         //Map<Long, IOFSwitch> switches = this.getSwitches();
         //Collection<Link> links = this.getLinks();
-        Iterator<Host> it = hosts.iterator();
-        while (it.hasNext()) {
-            Host h = it.next();
+        for (Host h : this.getHosts()) {
             installRuleForHost(h);
         }
+
         /*********************************************************************/
     }
     // class used to return multiple stuff
@@ -171,10 +159,9 @@ public class L3Routing implements IFloodlightModule, IOFSwitchListener,
             this.ports = ports;
         }
     }
-    private int searchArr(IOFSwitch sw, Long[] swArr, int swCount) {
-        int s;
-        for (s = 0; s < swCount; ++s) {
-            if (swArr[s].longValue() == sw.getId()) {
+    private int searchArr(IOFSwitch sw, Long[] swArr) {
+        for (int s = 0; s < swArr.length; ++s) {
+            if (swArr[s] == sw.getId()) {
                 return s;
             }
         }
@@ -190,10 +177,8 @@ public class L3Routing implements IFloodlightModule, IOFSwitchListener,
         //assume all links have weight 1, graph based on set of edges(links)
         // algorithm based on https://www.programiz.com/dsa/bellman-ford-algorithm
         //how to change rule in flow table? remove then install again
-        Collection<Host> hosts = this.getHosts();
         Map<Long, IOFSwitch> switches = this.getSwitches();
         Collection<Link> links = this.getLinks(); //should only consider links between switches
-        int hostCount = hosts.size();
         int switchCount = switches.size();
         int linkCount = links.size();
         Long [] switchesArr = switches.keySet().toArray(new Long[switchCount]); //to use index to address switches
@@ -207,9 +192,9 @@ public class L3Routing implements IFloodlightModule, IOFSwitchListener,
             return null;
         }
         // each element correspond to the one in the same position as switchesArr
-        int dist[] = new int[switchCount]; // distance of each switch from src switch (in hops)
-        int prev[] = new int[switchCount]; // store the index of the previous sw in the shortest path
-        int ports[] = new int[switchCount]; // store the dst ports that reach the switches in the paths
+        int[] dist = new int[switchCount]; // distance of each switch from src switch (in hops)
+        int[] prev = new int[switchCount]; // store the index of the previous sw in the shortest path
+        int[] ports = new int[switchCount]; // store the dst ports that reach the switches in the paths
         //initiate
         for (int i = 0; i < switchCount; ++i) {
             dist[i] = Integer.MAX_VALUE;
@@ -218,7 +203,7 @@ public class L3Routing implements IFloodlightModule, IOFSwitchListener,
             ports[i] = -1;
         }
         //search switchesArr for index of srcSwitch
-        int s = searchArr(srcSwitch, switchesArr, switchCount);
+        int s = searchArr(srcSwitch, switchesArr);
 
         dist[s] = 0;
 
@@ -233,10 +218,10 @@ public class L3Routing implements IFloodlightModule, IOFSwitchListener,
                 }
                 //need to store the destination ports, since they will be the output port when tracing back to the source host
                 int dstPort = linkArr[j].getDstPort();
-                IOFSwitch srcSw = switches.get(new Long(srcId));
-                IOFSwitch dstSw = switches.get(new Long(dstId));
-                int srcIndex = searchArr(srcSw, switchesArr, switchCount);
-                int dstIndex = searchArr(dstSw, switchesArr, switchCount);
+                IOFSwitch srcSw = switches.get(srcId);
+                IOFSwitch dstSw = switches.get(dstId);
+                int srcIndex = searchArr(srcSw, switchesArr);
+                int dstIndex = searchArr(dstSw, switchesArr);
                 if (dist[srcIndex] != Integer.MAX_VALUE && dist[srcIndex] + 1 < dist[dstIndex]) {
                     dist[dstIndex] = dist[srcIndex] + 1;
                     prev[dstIndex] = srcIndex;
@@ -246,9 +231,7 @@ public class L3Routing implements IFloodlightModule, IOFSwitchListener,
         }
         // no need to check negative cycles
 
-        spInfo rtn = new spInfo(dist, prev, switchesArr, ports);
-
-        return rtn;
+        return new spInfo(dist, prev, switchesArr, ports);
 
     }
     /**
@@ -312,6 +295,7 @@ public class L3Routing implements IFloodlightModule, IOFSwitchListener,
 
         /*********************************************************************/
         /* TODO: Update routing: remove rules to route to host               */
+
         removeRuleForHost(host);
 
         /*********************************************************************/
@@ -341,6 +325,7 @@ public class L3Routing implements IFloodlightModule, IOFSwitchListener,
 
         /*********************************************************************/
         /* TODO: Update routing: change rules to route to host               */
+
         //first delete old rules
         //then recalculate sp and install new rules
         removeRuleForHost(host);
@@ -361,16 +346,15 @@ public class L3Routing implements IFloodlightModule, IOFSwitchListener,
 
         /*********************************************************************/
         /* TODO: Update routing: change routing rules for all hosts          */
+
         //basically startup but remove rules first
-        Collection<Host> hosts = this.getHosts();
         //Map<Long, IOFSwitch> switches = this.getSwitches();
         //Collection<Link> links = this.getLinks();
-        Iterator<Host> it = hosts.iterator();
-        while (it.hasNext()) {
-            Host h = it.next();
+        for (Host h : this.getHosts()) {
             removeRuleForHost(h);
             installRuleForHost(h);
         }
+
         /*********************************************************************/
     }
 
@@ -386,13 +370,12 @@ public class L3Routing implements IFloodlightModule, IOFSwitchListener,
 
         /*********************************************************************/
         /* TODO: Update routing: change routing rules for all hosts          */
-        Collection<Host> hosts = this.getHosts();
-        Iterator<Host> it = hosts.iterator();
-        while (it.hasNext()) {
-            Host h = it.next();
+
+        for (Host h : this.getHosts()) {
             removeRuleForHost(h);
             installRuleForHost(h);
         }
+
         /*********************************************************************/
     }
 
@@ -423,13 +406,12 @@ public class L3Routing implements IFloodlightModule, IOFSwitchListener,
 
         /*********************************************************************/
         /* TODO: Update routing: change routing rules for all hosts          */
-        Collection<Host> hosts = this.getHosts();
-        Iterator<Host> it = hosts.iterator();
-        while (it.hasNext()) {
-            Host h = it.next();
+
+        for (Host h : this.getHosts()) {
             removeRuleForHost(h);
             installRuleForHost(h);
         }
+
         /*********************************************************************/
     }
 
