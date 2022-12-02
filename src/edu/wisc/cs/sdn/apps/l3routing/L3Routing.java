@@ -7,6 +7,8 @@ import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 
+import org.openflow.protocol.action.OFAction;
+import org.openflow.protocol.instruction.OFInstruction;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -78,45 +80,48 @@ public class L3Routing implements IFloodlightModule, IOFSwitchListener,
     //helper function to install rule
     private void instR(IOFSwitch sw, int dstIP, int port) {
         OFMatch matchCriteria = new OFMatch();
-        matchCriteria.setNetworkDestination(OFMatch.ETH_TYPE_IPV4, dstIP);
-        OFActionOutput out = new OFActionOutput(port);
-        OFInstructionApplyActions ofAc = new OFInstructionApplyActions(Arrays.asList(out));
+        matchCriteria.setDataLayerType(OFMatch.ETH_TYPE_IPV4);
+        matchCriteria.setNetworkDestination(dstIP);
+        OFAction out = new OFActionOutput(port);
+        OFInstruction ofAc = new OFInstructionApplyActions(Arrays.asList(out));
         SwitchCommands.installRule(sw, table, SwitchCommands.DEFAULT_PRIORITY, matchCriteria, Arrays.asList(ofAc));
     }
     //helper function to install rule in each switch to route to host
     private void installRuleForHost(Host h) {
-        if (h.isAttachedToSwitch()) {
-            int dstIP = h.getIPv4Address();
-            spInfo sp = bellmanFord(h);
-            int[] dist = sp.distance;
-            //int[] prev = sp.previous;
-            Long[] swArr = sp.switchesArray;
-            int[] ports = sp.ports;
-            //rule for each switch: output packet on the right port to reach the next switch in the shortest path
-            //find the index of the host
-            int s;
-            for (s = 0; s < dist.length; s++) {
-                if (dist[s] == 0) {
-                    break;
-                }
-            }
+        int dstIP = h.getIPv4Address();
+        spInfo sp = bellmanFord(h);
+        if (sp == null)
+            return;
 
-            for (int i = 0; i < swArr.length; i++) {
-                // loop through all switches except for the host's switch
-                // put rule in these switches
-                IOFSwitch sw = this.getSwitches().get(swArr[i]);
-                if (i != s) {
-                    instR(sw, dstIP, ports[i]);
-                } else { //rule for the host's switch: forward packet to the host
-                    instR(sw, dstIP, h.getPort());
-                }
+        int[] dist = sp.distance;
+        //int[] prev = sp.previous;
+        Long[] swArr = sp.switchesArray;
+        int[] ports = sp.ports;
+        //rule for each switch: output packet on the right port to reach the next switch in the shortest path
+        //find the index of the host
+        int s;
+        for (s = 0; s < dist.length; s++) {
+            if (dist[s] == 0) {
+                break;
+            }
+        }
+
+        for (int i = 0; i < swArr.length; i++) {
+            // loop through all switches except for the host's switch
+            // put rule in these switches
+            IOFSwitch sw = this.getSwitches().get(swArr[i]);
+            if (i != s) {
+                instR(sw, dstIP, ports[i]);
+            } else { //rule for the host's switch: forward packet to the host
+                instR(sw, dstIP, h.getPort());
             }
         }
     }
 
     private void removeRuleForHost(Host h) {
         OFMatch matchCriteria = new OFMatch();
-        matchCriteria.setNetworkDestination(OFMatch.ETH_TYPE_IPV4, h.getIPv4Address());
+        matchCriteria.setDataLayerType(OFMatch.ETH_TYPE_IPV4);
+        matchCriteria.setNetworkDestination(h.getIPv4Address());
         for (IOFSwitch sw : this.getSwitches().values()) {
             SwitchCommands.removeRules(sw, table, matchCriteria);
         }
@@ -157,6 +162,16 @@ public class L3Routing implements IFloodlightModule, IOFSwitchListener,
             this.previous = p;
             this.switchesArray = sa;
             this.ports = ports;
+        }
+
+        @Override
+        public String toString() {
+            return "spInfo{" +
+                    "distance=" + Arrays.toString(distance) +
+                    ", previous=" + Arrays.toString(previous) +
+                    ", switchesArray=" + Arrays.toString(switchesArray) +
+                    ", ports=" + Arrays.toString(ports) +
+                    '}';
         }
     }
     private int searchArr(IOFSwitch sw, Long[] swArr) {
@@ -230,8 +245,9 @@ public class L3Routing implements IFloodlightModule, IOFSwitchListener,
             }
         }
         // no need to check negative cycles
-
-        return new spInfo(dist, prev, switchesArr, ports);
+        spInfo spInfo = new spInfo(dist, prev, switchesArr, ports);
+        System.out.println(spInfo);
+        return spInfo;
 
     }
     /**
