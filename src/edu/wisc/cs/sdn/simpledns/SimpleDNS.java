@@ -2,16 +2,22 @@ package edu.wisc.cs.sdn.simpledns;
 
 import edu.wisc.cs.sdn.simpledns.packet.DNS;
 import edu.wisc.cs.sdn.simpledns.packet.DNSQuestion;
+import edu.wisc.cs.sdn.simpledns.packet.DNSRdataString;
 import edu.wisc.cs.sdn.simpledns.packet.DNSResourceRecord;
 
+import java.io.BufferedReader;
+import java.io.FileNotFoundException;
+import java.io.FileReader;
 import java.io.IOException;
 import java.net.DatagramPacket;
 import java.net.DatagramSocket;
 import java.net.InetAddress;
 import java.net.SocketException;
+import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 
-// TODO: EC2 txt
 public class SimpleDNS {
 	public static final int BUFFER_SIZE = 2048;
 	public static final int SERVER_PORT = 8053;
@@ -20,6 +26,7 @@ public class SimpleDNS {
 	public static String rootNameServerIP = null;
 	public static String ec2CsvPath = null;
 	public static DNS prevLookup = null;
+	public static Map<Range, String> cidrLocMap = null;
 
 	public static void main(String[] args) throws IOException {
 		for (int i = 0; i < args.length; i++) {
@@ -33,8 +40,10 @@ public class SimpleDNS {
 		if (rootNameServerIP == null || ec2CsvPath == null) {
 			System.out.println("Usage: java SimpleDNS.java -r <rootServerIp> -e <csvPath>");
 			System.exit(-1);
+			return;  // for compiler
 		}
 
+		read();
 		start();
 	}
 
@@ -60,11 +69,13 @@ public class SimpleDNS {
 				} else {
 					response = lookup(manager, rootQuery, rootNameServerIP);
 				}
-				System.out.println(response);
+				appendTxtIfPresent(response);
+				System.out.println(response);  // debug
 				manager.send(response.serialize(), received.getAddress(), received.getPort());
 			} catch (IOException ex) {
 				System.out.println("DEBUG: an error occurred");
 				break;
+			} catch (RuntimeException ignored) {
 			}
 		} while (true);
 
@@ -82,7 +93,7 @@ public class SimpleDNS {
 		if (response.getAnswers().isEmpty()) {
 			for (DNSResourceRecord authorityRecord : response.getAuthorities()) {
 				String nextHostName = authorityRecord.getData().toString();
-				System.out.println("Found next host: " + nextHostName);
+				System.out.println("DEBUG: Found next host: " + nextHostName);
 				prevLookup = response;
 				return recursiveLookup(manager, query, nextHostName);
 			}
@@ -154,7 +165,7 @@ public class SimpleDNS {
 			return true;
 		}
 		if (response.getAnswers().isEmpty()) {
-			throw new RuntimeException("No answers found");
+			throw new RuntimeException("DEBUG: no answers found");
 		}
 		DNSQuestion question = query.getQuestions().get(0);
 		for (DNSResourceRecord answer : response.getAnswers()) {
@@ -174,6 +185,108 @@ public class SimpleDNS {
 	private static DNS clone(DNS packet) {
 		byte[] serialize = packet.serialize();
 		return DNS.deserialize(serialize, serialize.length);
+	}
+
+	/**
+	 * Appends a txt to the answer section if an answer is of type A and the IP address is within an
+	 * EC2 region.
+	 *
+	 * @param response The response whose answers will be matched.
+	 */
+	private static void appendTxtIfPresent(DNS response) {
+		if (response.getAnswers().isEmpty()) {
+			return;
+		}
+		List<DNSResourceRecord> txt = new ArrayList<>();
+		for (DNSResourceRecord answer : response.getAnswers()) {
+			if (answer.getType() == DNS.TYPE_A) {
+				String host = answer.getName();
+				String ip = answer.getData().toString();
+				for (Map.Entry<Range, String> entry : cidrLocMap.entrySet()) {
+					Range range = entry.getKey();
+					if (range.contains(ip)) {
+						System.out.println("DEBUG: Found a containing range");
+						DNSRdataString data = new DNSRdataString(entry.getValue() + "-" + ip);
+						txt.add(new DNSResourceRecord(host, (short) 16, data));
+						break;
+					}
+				}
+			}
+		}
+		response.getAnswers().addAll(txt);
+	}
+
+	/**
+	 * Reads the given file path to parse cidr expressions and location into the static map whose
+	 * key is the cidr expression and value the corresponding location.
+	 */
+	public static void read() {
+		try {
+			cidrLocMap = new HashMap<>();
+			BufferedReader br = new BufferedReader(new FileReader(ec2CsvPath));
+			String line;
+			while ((line = br.readLine()) != null) {
+				String[] pair = line.split(",");
+				cidrLocMap.put(new Range(pair[0]), pair[1]);
+			}
+		} catch (FileNotFoundException ex) {
+			System.out.println("DEBUG: no such file - " + ec2CsvPath);
+			System.exit(-1);
+		} catch (IOException e) {
+			System.out.println("DEBUG: an error occurred while reading");
+			System.exit(-1);
+		}
+	}
+
+	/**
+	 * Converts an IPv4 address from string format to integer format. Copied from previous projects.
+	 *
+	 * @param ipAddress IPv4 address in string format.
+	 * @return The same IPv4 address in integer format.
+	 */
+	public static int toIPv4Address(String ipAddress) {
+		if (ipAddress == null) {
+			throw new IllegalArgumentException("Specified IPv4 address mustcontain 4 sets of numerical digits separated by periods");
+		} else {
+			String[] octets = ipAddress.split("\\.");
+			if (octets.length != 4) {
+				throw new IllegalArgumentException("Specified IPv4 address mustcontain 4 sets of numerical digits separated by periods");
+			} else {
+				int result = 0;
+
+				for(int i = 0; i < 4; ++i) {
+					int oct = Integer.parseInt(octets[i]);
+					if (oct > 255 || oct < 0) {
+						throw new IllegalArgumentException("Octet values in specified IPv4 address must be 0 <= value <= 255");
+					}
+
+					result |= oct << (3 - i) * 8;
+				}
+
+				return result;
+			}
+		}
+	}
+
+	/**
+	 * Converts an IPv4 address from integer format to string format. Copied from previous projects.
+	 *
+	 * @param ipAddress IPv4 address in integer format.
+	 * @return The same IPv4 address in string format.
+	 */
+	public static String fromIPv4Address(int ipAddress) {
+		StringBuilder sb = new StringBuilder();
+		int result;
+
+		for(int i = 0; i < 4; ++i) {
+			result = ipAddress >> (3 - i) * 8 & 255;
+			sb.append(Integer.valueOf(result).toString());
+			if (i != 3) {
+				sb.append(".");
+			}
+		}
+
+		return sb.toString();
 	}
 
 	/**
@@ -242,6 +355,35 @@ public class SimpleDNS {
 		 */
 		public void close() {
 			socket.close();
+		}
+	}
+
+	public static class Range {
+		private final int first;
+		private final int last;
+
+		public Range(String cidr) {
+			this.first = first(cidr);
+			this.last = last(cidr);
+
+			System.out.println("DEBUG: " + cidr +" (" + fromIPv4Address(first) + " ~ " + fromIPv4Address(last) + ")");
+		}
+
+		private int first(String cidr) {
+			return toIPv4Address(cidr.split("/")[0]);
+		}
+
+		private int last(String cidr) {
+			String[] parts = cidr.split("/");
+			int first = toIPv4Address(parts[0]);
+			int bits = 32 - Integer.parseInt(parts[1]);
+			int delta = (int) Math.pow(2, bits) - 1;
+			return first + delta;
+		}
+
+		public boolean contains(String ip) {
+			int intIp = toIPv4Address(ip);
+			return intIp >= first && intIp <= last;
 		}
 	}
 }
