@@ -11,7 +11,6 @@ import java.net.InetAddress;
 import java.net.SocketException;
 import java.util.List;
 
-// TODO: additional & authority section
 // TODO: EC2 txt
 public class SimpleDNS {
 	public static final int BUFFER_SIZE = 2048;
@@ -20,6 +19,7 @@ public class SimpleDNS {
 
 	public static String rootNameServerIP = null;
 	public static String ec2CsvPath = null;
+	public static DNS prevLookup = null;
 
 	public static void main(String[] args) throws IOException {
 		for (int i = 0; i < args.length; i++) {
@@ -55,6 +55,8 @@ public class SimpleDNS {
 					while (!satisfy(rootQuery, response)) {
 						response = resolve(manager, rootQuery, response, rootNameServerIP);
 					}
+					response.getAuthorities().addAll(prevLookup.getAuthorities());
+					response.getAdditional().addAll(prevLookup.getAdditional());
 				} else {
 					response = lookup(manager, rootQuery, rootNameServerIP);
 				}
@@ -65,6 +67,8 @@ public class SimpleDNS {
 				break;
 			}
 		} while (true);
+
+		manager.close();
 	}
 
 	public static DNS lookup(SocketManager manager, DNS query, String hostName) throws IOException {
@@ -79,6 +83,7 @@ public class SimpleDNS {
 			for (DNSResourceRecord authorityRecord : response.getAuthorities()) {
 				String nextHostName = authorityRecord.getData().toString();
 				System.out.println("Found next host: " + nextHostName);
+				prevLookup = response;
 				return recursiveLookup(manager, query, nextHostName);
 			}
 		}
