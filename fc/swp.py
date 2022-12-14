@@ -81,13 +81,16 @@ class SWPSender:
     def _send(self, data):
         # TODO
         self.sem.acquire()
+        self.lk.acquire()
         seq = self._lfs # seq number for this data chunk to use
         self._lfs += 1
         # add data to buffer?
         self.buff[seq] = data
         swp_packet = SWPPacket(SWPType.DATA, seq, data)
         pkt_raw = swp_packet.to_bytes()
+        # self.lk.acquire()
         self._llp_endpoint.send(pkt_raw)
+        self.lk.release()
 
         self.t = threading.Timer(SWPSender._TIMEOUT, self._retransmit, [seq])
         self.t.start()
@@ -97,10 +100,12 @@ class SWPSender:
         # TODO
         if self.buff.get(seq_num) is None:
             return
+        self.lk.acquire()
         data = self.buff[seq_num]
         swp_packet = SWPPacket(SWPType.DATA, seq_num, data)
         pkt_raw = swp_packet.to_bytes()
         self._llp_endpoint.send(pkt_raw)
+        self.lk.release()
         self.t = threading.Timer(SWPSender._TIMEOUT, self._retransmit, [seq_num])
         #self.seq = seq_num
         self.t.start()
