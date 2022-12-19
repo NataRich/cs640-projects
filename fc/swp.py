@@ -90,10 +90,9 @@ class SWPSender:
         pkt_raw = swp_packet.to_bytes()
         # self.lk.acquire()
         self._llp_endpoint.send(pkt_raw)
-        self.lk.release()
-
         self.t = threading.Timer(SWPSender._TIMEOUT, self._retransmit, [seq])
         self.t.start()
+        self.lk.release()
         return
         
     def _retransmit(self, seq_num):
@@ -105,10 +104,11 @@ class SWPSender:
         swp_packet = SWPPacket(SWPType.DATA, seq_num, data)
         pkt_raw = swp_packet.to_bytes()
         self._llp_endpoint.send(pkt_raw)
-        self.lk.release()
+
         self.t = threading.Timer(SWPSender._TIMEOUT, self._retransmit, [seq_num])
         #self.seq = seq_num
         self.t.start()
+        self.lk.release()
         return 
 
     def _recv(self):
