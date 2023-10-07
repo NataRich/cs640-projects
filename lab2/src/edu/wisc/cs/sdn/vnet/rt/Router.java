@@ -5,7 +5,9 @@ import edu.wisc.cs.sdn.vnet.DumpFile;
 import edu.wisc.cs.sdn.vnet.Iface;
 
 import net.floodlightcontroller.packet.Ethernet;
+import net.floodlightcontroller.packet.IPacket;
 import net.floodlightcontroller.packet.IPv4;
+import net.floodlightcontroller.packet.MACAddress;
 
 /**
  * @author Aaron Gember-Jacobson and Anubhavnidhi Abhashkumar
@@ -84,52 +86,66 @@ public class Router extends Device
                 etherPacket.toString().replace("\n", "\n\t"));
 		
 		/********************************************************************/
-		/* TODO: Handle packets                                             */
-		//1.use getEtherType to check if is IPv4 packet
-		short packetType = etherPacket.getEtherType();
-		if (packetType != 0x0800) { //0x0800 is the 
-			return;//drop the packet?
+		/* DONE: Handle packets                                             */
+		// check packet type
+		if (etherPacket.getEtherType() != Ethernet.TYPE_IPv4) {
+			return;
 		}
-                IPv4 header = (IPv4)etherPacket.getPayload(); //type cast?
-		byte headerLength = header.getHeaderLength() * 4;
-		short oldChecksum = header.getChecksum(); //get the old checksum and will compare to the calculated one
-		header.resetChecksum();
 
-		//compute checksum?
-		byte[] data = new byte[headerLength];
-		ByteBuffer bb = ByteBuffer.wrap(data);
-		//what to put here??
-		bb.put((byte) (((header.getVersion() & 0xf) << 4) | (header.getHeaderLength() & 0xf)));
-        	bb.put(header.getDiffServ());
-        	bb.putShort(header.getTotalLength());
-        	bb.putShort(header.getIdentification());
-        	bb.putShort((short) (((header.getFlags() & 0x7) << 13) | (header.getFragmentOffset() & 0x1fff)));
-        	bb.put(header.getTtl());
-        	bb.put(header.getProtocol());
-        	bb.putShort(header.getChecksum());
-        	bb.putInt(header.getSourceAddress());
-        	bb.putInt(header.getDestinationAddress());
-        	if (header.getOptions() != null) //not sure if option should be included
-            		bb.put(header.getOptions());
-            	bb.rewind();
-            	int accumulation = 0;
-            	for (int i = 0; i < header.getHeaderLength() * 2; ++i) {
-                	accumulation += 0xffff & bb.getShort();
-            	}
-            	accumulation = ((accumulation >> 16) & 0xffff) + (accumulation & 0xffff);
-            	short newChecksum = (short) (~accumulation & 0xffff);
-		if (newChecksum != oldChecksum) {
-			return; //drop?
+		// verify checksum
+		IPv4 header = (IPv4) etherPacket.getPayload();
+		short checksum = header.getChecksum();
+		header.resetChecksum();
+		byte[] serializedBytes = header.serialize();
+		header = (IPv4) header.deserialize(serializedBytes, 0, serializedBytes.length);
+		if (checksum != header.getChecksum()) {
+			return;
 		}
-		//decre TTL 
-		byte oldTtl = header.getTtl();
-		header.setTtl(oldTtl-1);
+
+		// verify ttl
+		header.setTtl((byte) (header.getTtl() - 1));
 		if (header.getTtl() == 0) {
 			return;
 		}
 
+		// check interfaces
+		for (Iface iface : interfaces.values()) {
+			if (iface.getIpAddress() == header.getDestinationAddress()) {
+				return;
+			}
+		}
 
+		// forward packets
+		RouteEntry routeEntry = routeTable.lookup(header.getDestinationAddress());
+		if (routeEntry == null) {
+			return;
+		}
 
+		if (routeEntry.getInterface().equals(inIface)) {
+			return;
+		}
+
+		ArpEntry arpEntry;
+		if (routeEntry.getGatewayAddress() == 0) {
+			arpEntry = arpCache.lookup(header.getDestinationAddress());
+		} else {
+			arpEntry = arpCache.lookup(routeEntry.getGatewayAddress());
+		}
+
+		if (arpEntry == null) {
+			return;
+		}
+
+		// since TTL changed, checksum needs to be recomputed.
+		header.resetChecksum();
+		serializedBytes = header.serialize();
+		header = (IPv4) header.deserialize(serializedBytes, 0, serializedBytes.length);
+		Ethernet nextPacket = (Ethernet) etherPacket.setPayload(header);
+		MACAddress destinationMac = arpEntry.getMac();
+		MACAddress sourceMac = routeEntry.getInterface().getMacAddress();
+		nextPacket.setDestinationMACAddress(destinationMac.toBytes());
+		nextPacket.setSourceMACAddress(sourceMac.toBytes());
+		sendPacket(nextPacket, routeEntry.getInterface());
 		/********************************************************************/
 	}
 }
